@@ -163,22 +163,25 @@ fn restore_preferences(app: &mut SlideApp, d: &Dialog) {
     }
 }
 
-/// The Dark appearance menu (Preferences, File ▸ Account): Use system setting, On or Off. A choice
-/// applies at once.
+/// The Dark appearance menu (Preferences, File ▸ Account), after its label: Use system setting, On
+/// or Off. A choice applies at once.
 pub(crate) fn dark_mode_menu(app: &mut SlideApp, ui: &mut Ui) {
     const LABEL: &str = "Dark appearance";
     let current = app.ui.dark_mode;
-    let menu = egui::ComboBox::from_label(LABEL).selected_text(current.label()).width(150.0).show_ui(ui, |ui| {
-        for mode in theme::DarkMode::ALL {
-            if ui.selectable_label(mode == current, mode.label()).clicked() {
-                let _ = app.run("view.dark", json!({ "mode": mode }));
+    ui.horizontal(|ui| {
+        ui.label(LABEL);
+        let menu = egui::ComboBox::from_id_salt(LABEL).selected_text(current.label()).width(150.0).show_ui(ui, |ui| {
+            for mode in theme::DarkMode::ALL {
+                if ui.selectable_label(mode == current, mode.label()).clicked() {
+                    let _ = app.run("view.dark", json!({ "mode": mode }));
+                }
             }
-        }
-    });
-    menu.response.widget_info(|| {
-        let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, LABEL);
-        info.current_text_value = Some(current.label().to_string());
-        info
+        });
+        menu.response.widget_info(|| {
+            let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, LABEL);
+            info.current_text_value = Some(current.label().to_string());
+            info
+        });
     });
 }
 
