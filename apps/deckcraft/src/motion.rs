@@ -1,26 +1,26 @@
 //! The system's animation setting, which Preferences ▸ Animation effects follows while it is set
-//! to Use system setting (`Services::animations_enabled`).
+//! to Use system setting.
 //!
-//! - Windows: Settings ▸ Accessibility ▸ Visual effects ▸ Animation effects (in the Control Panel,
-//!   "Show animations in Windows"), read through the Windows Runtime's `UISettings`.
+//! - Windows: Settings ▸ Accessibility ▸ Visual effects ▸ Animation effects ("Show animations in
+//!   Windows" in the Control Panel), read through the Windows Runtime's `UISettings`.
 //! - macOS: System Settings ▸ Accessibility ▸ Display ▸ Reduce motion, read through `NSWorkspace`.
 //! - Linux and the BSDs: the desktop's animations setting ([`desktop`]).
 //!
-//! All three are safe APIs of crates already in the build (the workspace forbids unsafe, which
-//! the Win32 call needs). The UI asks every frame, so the answer always comes from memory:
-//! Windows and macOS are asked again at most once a second, and the Linux/BSD side keeps its
-//! answer up to date on a thread of its own.
+//! The UI asks every frame, so the answer always comes from memory: Windows and macOS are asked
+//! again at most once a second, and the Linux/BSD answer is kept current by a thread of its own.
+//! All three are safe calls (the workspace forbids `unsafe`, which the Win32 call would need).
 
+// Built for tests on every platform, so its parsing is tested everywhere.
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
 mod desktop;
 
-/// The answer to "does the system have animation effects on?" for the UI; `None` while the
-/// system doesn't say. `ctx` is asked to repaint when an answer that arrives later changes it.
-pub fn hook(ctx: &egui::Context) -> Box<dyn Fn() -> Option<bool>> {
+/// Whether the system has animation effects on (`None` while it doesn't say), for
+/// `Services::animations_enabled`. `ctx` repaints when an answer that arrives later changes it.
+pub fn animations_enabled(ctx: &egui::Context) -> Box<dyn Fn() -> Option<bool>> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         let _ = ctx;
-        Box::new(remembered(logged(system_enabled), REFRESH))
+        Box::new(remembered(logged(ask_system), REFRESH))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -53,42 +53,42 @@ fn remembered(read: impl Fn() -> Option<bool>, every: std::time::Duration) -> im
     }
 }
 
-/// `read`, with its answer written to the log when it changes: the one line that tells whether
-/// "Use system setting" found a setting to follow.
+/// `read`, with its answer logged whenever it changes: the line that tells whether Use system
+/// setting found a setting to follow.
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn logged(read: impl Fn() -> Option<bool>) -> impl Fn() -> Option<bool> {
     let last = std::cell::Cell::new(None::<Option<bool>>);
     move || {
         let answer = read();
         if last.replace(Some(answer)) != Some(answer) {
-            log::info!("system animation effects: {}", describe(answer));
+            log_answer(answer);
         }
         answer
     }
 }
 
-fn describe(answer: Option<bool>) -> &'static str {
-    match answer {
+fn log_answer(answer: Option<bool>) {
+    let said = match answer {
         Some(true) => "on",
         Some(false) => "off",
         None => "not reported",
-    }
-}
-
-/// Whether Windows has Animation effects on; `None` when it can't be asked.
-#[cfg(target_os = "windows")]
-fn system_enabled() -> Option<bool> {
-    animations_enabled().map_err(|e| log::debug!("system animation effects: {e}")).ok()
+    };
+    log::info!("system animation effects: {said}");
 }
 
 #[cfg(target_os = "windows")]
-fn animations_enabled() -> windows::core::Result<bool> {
+fn ask_system() -> Option<bool> {
+    ui_settings_animations().map_err(|e| log::debug!("system animation effects: {e}")).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn ui_settings_animations() -> windows::core::Result<bool> {
     windows::UI::ViewManagement::UISettings::new()?.AnimationsEnabled()
 }
 
-/// Whether macOS plays animations: Reduce motion is off.
 #[cfg(target_os = "macos")]
-fn system_enabled() -> Option<bool> {
+fn ask_system() -> Option<bool> {
+    // Animations play while Reduce motion is off.
     Some(!objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
 }
 
@@ -133,9 +133,9 @@ mod tests {
         }
     }
 
-    /// The user's saved Animation effects choice, or `None` when `reg` can't read it. Windows
-    /// keeps its on/off system parameters as the bits of `UserPreferencesMask`: bit n is the
-    /// parameter `SPI_GET…` 0x1000 + 2n, and client-area animation is 0x1042, so bit 33.
+    /// The Animation effects choice saved in the registry, or `None` when `reg` can't read it.
+    /// Windows keeps its on/off system parameters as the bits of `UserPreferencesMask`: bit n is
+    /// the parameter `SPI_GET…` 0x1000 + 2n, and client-area animation is 0x1042, so bit 33.
     #[cfg(target_os = "windows")]
     fn saved_choice() -> Option<bool> {
         let out = std::process::Command::new("reg").args(["query", r"HKCU\Control Panel\Desktop", "/v", "UserPreferencesMask"]).output().ok()?;
@@ -152,9 +152,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn the_answer_is_windows_animation_effects_setting() {
-        match super::animations_enabled() {
+        match super::ui_settings_animations() {
             Ok(enabled) => {
-                assert_eq!(super::system_enabled(), Some(enabled));
+                assert_eq!(super::ask_system(), Some(enabled));
                 // Only this way round: the session's own value may be off for other reasons (a
                 // policy, a remote session) while the saved choice is on.
                 if saved_choice() == Some(false) {
@@ -163,7 +163,7 @@ mod tests {
             }
             Err(e) => {
                 eprintln!("UISettings isn't available here ({e}); not compared with the saved choice");
-                assert_eq!(super::system_enabled(), None);
+                assert_eq!(super::ask_system(), None);
             }
         }
     }

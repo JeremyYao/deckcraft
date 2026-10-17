@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use deckcraft_engine::Session;
-use deckcraft_ui_egui::motion::Animations;
+use deckcraft_ui_egui::motion::AnimationEffects;
 use deckcraft_ui_egui::{Services, SlideApp, UiState, ViewMode};
 use egui::{Event, Modifiers, MouseWheelUnit, TouchPhase, vec2};
 use egui_kittest::kittest::{NodeT as _, Queryable as _};
@@ -38,7 +38,7 @@ fn harness(system: &System, animated: bool) -> Harness {
     h
 }
 
-fn set(h: &mut Harness, mode: Animations) {
+fn set(h: &mut Harness, mode: AnimationEffects) {
     h.state_mut().run("view.animationEffects", json!({"mode": mode.code()})).unwrap();
     h.step();
 }
@@ -68,7 +68,7 @@ const NOTCH: f32 = 1.221_402_8;
 fn the_default_follows_the_system_and_on_and_off_overrule_it() {
     let system = System::default();
     let mut h = harness(&system, true);
-    assert_eq!(h.state().ui.animation_effects, Animations::System);
+    assert_eq!(h.state().ui.animation_effects, AnimationEffects::System);
     // The system says nothing (a platform that can't be asked, or no answer yet): on.
     assert!(h.state().animations_on() && h.state().system_animations().is_none());
     assert_eq!(h.ctx.global_style().animation_time, 0.1);
@@ -77,7 +77,7 @@ fn the_default_follows_the_system_and_on_and_off_overrule_it() {
     h.step();
     assert_eq!(h.state().system_animations(), Some(false));
     assert!(!h.state().animations_on());
-    assert_eq!(h.state().ui.animation_effects, Animations::System, "the preference itself is untouched");
+    assert_eq!(h.state().ui.animation_effects, AnimationEffects::System, "the preference itself is untouched");
     for theme in [egui::Theme::Light, egui::Theme::Dark] {
         let style = h.ctx.style_of(theme);
         assert_eq!(style.animation_time, 0.0, "off: menus, tooltips and dialogs don't fade in");
@@ -90,11 +90,11 @@ fn the_default_follows_the_system_and_on_and_off_overrule_it() {
     assert_eq!(h.ctx.global_style().animation_time, 0.1);
     // On and Off don't ask the system.
     system.set(Some(false));
-    set(&mut h, Animations::On);
+    set(&mut h, AnimationEffects::On);
     assert!(h.state().animations_on());
     assert_eq!(h.ctx.global_style().animation_time, 0.1);
     system.set(Some(true));
-    set(&mut h, Animations::Off);
+    set(&mut h, AnimationEffects::Off);
     assert!(!h.state().animations_on());
     assert_eq!(h.ctx.global_style().animation_time, 0.0);
     // Dark Mode restyles the window; the fades stay off.
@@ -102,7 +102,7 @@ fn the_default_follows_the_system_and_on_and_off_overrule_it() {
     h.run_steps(2);
     assert_eq!(h.ctx.global_style().animation_time, 0.0);
     // Back to following it.
-    set(&mut h, Animations::System);
+    set(&mut h, AnimationEffects::System);
     assert!(h.state().animations_on());
     assert_eq!(h.ctx.global_style().animation_time, 0.1);
 }
@@ -112,7 +112,7 @@ fn a_headless_window_never_gains_animations_from_the_setting() {
     // The harness (and an offscreen render) has egui's animations off; On leaves that alone.
     let system = System::default();
     let mut h = harness(&system, false);
-    for mode in [Animations::On, Animations::Off, Animations::On, Animations::System] {
+    for mode in [AnimationEffects::On, AnimationEffects::Off, AnimationEffects::On, AnimationEffects::System] {
         set(&mut h, mode);
         h.step();
         assert_eq!(h.ctx.global_style().animation_time, 0.0, "{mode:?}");
@@ -131,7 +131,7 @@ fn the_command_takes_the_three_modes_and_refuses_others() {
     assert_eq!(app.run("view.animationEffects", json!({"mode": " OFF "})), Ok(json!({"mode": "off", "on": false, "system": false})));
     for bad in [json!("reduced"), json!(""), json!(1), json!([]), json!({"mode": "on"})] {
         assert!(app.run("view.animationEffects", json!({"mode": bad})).is_err(), "{bad}");
-        assert_eq!(app.ui.animation_effects, Animations::Off, "a refused mode changes nothing");
+        assert_eq!(app.ui.animation_effects, AnimationEffects::Off, "a refused mode changes nothing");
     }
     // A `mode` of null is no mode (clients that write every optional field).
     assert_eq!(app.run("view.animationEffects", json!({"mode": null, "on": true})), Ok(json!({"mode": "on", "on": true, "system": false})));
@@ -148,19 +148,39 @@ fn the_command_takes_the_three_modes_and_refuses_others() {
     assert_eq!((&seen["animationsOn"], &seen["systemAnimations"], &seen["ui"]["animationEffects"]), (&json!(false), &json!(false), &json!("system")));
 }
 
+/// The control channel's `ui.set` takes a mode or a switch, and reports a value it can't use.
+#[test]
+fn ui_set_takes_animation_effects() {
+    use deckcraft_ui_egui::control::{self, ControlRequest, Outcome};
+    let system = System::default();
+    let mut h = harness(&system, false);
+    let mut ui_set = |effects: serde_json::Value| {
+        let (request, _reply) = ControlRequest::new("ui.set", json!({"animationEffects": effects}));
+        let ctx = h.ctx.clone();
+        match control::handle(h.state_mut(), &ctx, &request) {
+            Outcome::Done(reply) => reply["ok"] == json!(true),
+            Outcome::Screenshot { .. } => panic!("ui.set doesn't take a screenshot"),
+        }
+    };
+    assert!(ui_set(json!("off")));
+    assert!(ui_set(json!(true)));
+    assert!(!ui_set(json!("reduced")) && !ui_set(json!(3)), "a value it can't use is an error");
+    assert_eq!(h.state().ui.animation_effects, AnimationEffects::On, "and changes nothing");
+}
+
 #[test]
 fn the_choice_is_saved_and_an_older_or_damaged_file_still_loads() {
-    let ui = UiState { animation_effects: Animations::Off, ..Default::default() };
+    let ui = UiState { animation_effects: AnimationEffects::Off, ..Default::default() };
     let saved = serde_json::to_value(&ui).unwrap();
     assert_eq!(saved["animationEffects"], "off");
-    assert_eq!(serde_json::from_value::<UiState>(saved).unwrap().animation_effects, Animations::Off);
+    assert_eq!(serde_json::from_value::<UiState>(saved).unwrap().animation_effects, AnimationEffects::Off);
     // A `ui.json` from before the setting: Use system setting, and nothing else is lost.
     let older: UiState = serde_json::from_value(json!({"tab": "Insert", "notes": false})).unwrap();
-    assert_eq!((older.animation_effects, older.tab.as_str(), older.notes), (Animations::System, "Insert", false));
+    assert_eq!((older.animation_effects, older.tab.as_str(), older.notes), (AnimationEffects::System, "Insert", false));
     // A value this version can't read doesn't cost the other preferences.
     for unreadable in [json!("reduced"), json!(true), json!(7), json!(null), json!({"mode": "off"})] {
         let ui: UiState = serde_json::from_value(json!({"tab": "Design", "animationEffects": unreadable})).unwrap();
-        assert_eq!((ui.animation_effects, ui.tab.as_str()), (Animations::System, "Design"));
+        assert_eq!((ui.animation_effects, ui.tab.as_str()), (AnimationEffects::System, "Design"));
     }
 }
 
@@ -183,15 +203,16 @@ fn off_scrolls_a_wheel_notch_at_once_and_on_eases_it_in() {
     assert!(first > 0.0 && first < whole * 0.6, "on: the notch arrives over several frames ({first} of {whole})");
 
     let (mut h, top) = zoomed(&system);
-    set(&mut h, Animations::Off);
+    set(&mut h, AnimationEffects::Off);
     wheel(&mut h, -1.0, Modifiers::NONE);
     let at_once = scrolled(&h, top);
     assert!((at_once - 40.0).abs() < 0.01, "off: the whole notch in the frame the wheel turned ({at_once})");
-    assert!((at_once - whole).abs() < 1.0, "the same distance as when it is eased ({at_once}, {whole})");
+    // To the pixel: the canvas puts the slide on whole device pixels (#184).
+    assert!((at_once - whole).abs() <= 1.0, "the same distance as when it is eased ({at_once}, {whole})");
     h.run_steps(30);
     assert_eq!(scrolled(&h, top), at_once, "and nothing trails in afterwards");
     // The same when it is the system that has animations off.
-    set(&mut h, Animations::System);
+    set(&mut h, AnimationEffects::System);
     system.set(Some(false));
     wheel(&mut h, -1.0, Modifiers::NONE);
     assert!((scrolled(&h, top) - 80.0).abs() < 0.01, "{}", scrolled(&h, top));
@@ -222,7 +243,7 @@ fn off_zooms_a_ctrl_wheel_notch_at_once_and_on_eases_it_in() {
 
     let mut h = at_100(&system);
     let top = h.state().slide_rect.unwrap().min.y;
-    set(&mut h, Animations::Off);
+    set(&mut h, AnimationEffects::Off);
     wheel(&mut h, 1.0, Modifiers::COMMAND);
     assert!((zoom(&h) - NOTCH).abs() < 1e-4, "off: the whole notch in the frame the wheel turned ({})", zoom(&h));
     h.run_steps(30);
@@ -263,7 +284,7 @@ fn preferences_offers_use_system_setting_on_and_off() {
     system.set(Some(false));
     h.run_steps(2);
     h.get_by_label("Animation effects are off in your system's settings.");
-    for (label, mode) in [("Off", Animations::Off), ("On", Animations::On), ("Use system setting", Animations::System)] {
+    for (label, mode) in [("Off", AnimationEffects::Off), ("On", AnimationEffects::On), ("Use system setting", AnimationEffects::System)] {
         h.get_by_role(egui::accesskit::Role::ComboBox).click();
         h.run_steps(3);
         h.get_by_role_and_label(egui::accesskit::Role::Button, label).click();
@@ -273,4 +294,27 @@ fn preferences_offers_use_system_setting_on_and_off() {
         assert!(h.state().dialog.as_ref().is_some_and(|d| d.id == "preferences"), "choosing keeps Preferences open");
     }
     assert!(!h.state().animations_on(), "following a system that has them off");
+}
+
+/// Preferences applies a change as it is made; Cancel puts the choice back, Done keeps it.
+#[test]
+fn preferences_cancel_restores_the_choice_and_done_keeps_it() {
+    let system = System::default();
+    let mut h = harness(&system, false);
+    let choose_off_then = |h: &mut Harness, button: &str| {
+        h.state_mut().run("app.preferences", json!({})).unwrap();
+        h.run_steps(3);
+        h.get_by_role(egui::accesskit::Role::ComboBox).click();
+        h.run_steps(3);
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Off").click();
+        h.run_steps(3);
+        assert_eq!(h.state().ui.animation_effects, AnimationEffects::Off, "the choice applies at once");
+        h.get_by_role_and_label(egui::accesskit::Role::Button, button).click();
+        h.run_steps(3);
+        assert!(h.state().dialog.is_none(), "{button} closes Preferences");
+    };
+    choose_off_then(&mut h, "Cancel");
+    assert_eq!(h.state().ui.animation_effects, AnimationEffects::System, "Cancel puts the choice back");
+    choose_off_then(&mut h, "Done");
+    assert_eq!(h.state().ui.animation_effects, AnimationEffects::Off, "Done keeps it");
 }

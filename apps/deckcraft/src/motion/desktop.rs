@@ -109,23 +109,6 @@ fn from_files(read: impl Fn(&str) -> Option<String>) -> Option<bool> {
     }))
 }
 
-/// An answer as the one byte the watcher thread and the UI share.
-fn encode(answer: Option<bool>) -> u8 {
-    match answer {
-        None => 0,
-        Some(true) => 1,
-        Some(false) => 2,
-    }
-}
-
-fn decode(byte: u8) -> Option<bool> {
-    match byte {
-        1 => Some(true),
-        2 => Some(false),
-        _ => None,
-    }
-}
-
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use watcher::watch;
 
@@ -133,14 +116,13 @@ pub use watcher::watch;
 mod watcher {
     use std::io::Read;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Duration;
 
     use zbus::blocking::Connection;
     use zbus::zvariant::{OwnedValue, Value};
 
-    use super::{Answer, Meaning, combine, decode, duration_factor, enable_animations, encode, from_files, reduced_motion};
+    use super::{Answer, Meaning, combine, duration_factor, enable_animations, from_files, reduced_motion};
 
     /// How often the desktop is asked again. The portal also publishes a change signal, but one
     /// round trip every few seconds is cheap and follows a changed setting soon enough.
@@ -160,7 +142,7 @@ mod watcher {
     /// `None` until the desktop has answered, and where it says nothing. `ctx` repaints when the
     /// answer changes, so a window at rest follows it too.
     pub fn watch(ctx: egui::Context) -> impl Fn() -> Option<bool> {
-        let answer = Arc::new(AtomicU8::new(encode(None)));
+        let answer = Arc::new(Mutex::new(None));
         let shared = answer.clone();
         let started = std::thread::Builder::new().name("deckcraft-motion".into()).spawn(move || {
             let bus = Connection::session().map_err(|e| log::debug!("the desktop's animations setting: no session bus ({e})")).ok();
@@ -170,8 +152,8 @@ mod watcher {
                 let now = bus.as_ref().and_then(from_portal).or_else(|| from_files(read_config));
                 if last != Some(now) {
                     last = Some(now);
-                    log::info!("system animation effects: {}", super::super::describe(now));
-                    shared.store(encode(now), Ordering::Relaxed);
+                    crate::motion::log_answer(now);
+                    *shared.lock().unwrap_or_else(PoisonError::into_inner) = now;
                     ctx.request_repaint();
                 }
                 std::thread::sleep(POLL);
@@ -180,7 +162,7 @@ mod watcher {
         if let Err(e) = started {
             log::warn!("the desktop's animations setting isn't watched: {e}");
         }
-        move || decode(answer.load(Ordering::Relaxed))
+        move || *answer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// What the settings portal says.
@@ -250,7 +232,6 @@ mod watcher {
 
         /// The UI's side never waits for the desktop, with or without a session bus or portal.
         #[test]
-        #[allow(clippy::disallowed_methods)] // a native-only timing test: wasm never runs it
         fn the_watcher_answers_from_memory_at_once() {
             let read = watch(egui::Context::default());
             let asked = std::time::Instant::now();
@@ -337,13 +318,5 @@ mod tests {
         assert_eq!(files(Some("[KDE]\nSingleClick=false\n"), Some("[Settings]\ngtk-enable-animations=maybe\n"), None), None);
         // Any one saying off is enough.
         assert_eq!(files(Some("[KDE]\nAnimationDurationFactor=1\n"), None, Some("[Settings]\ngtk-enable-animations=0\n")), Some(false));
-    }
-
-    #[test]
-    fn the_shared_answer_survives_its_byte() {
-        for answer in [None, Some(true), Some(false)] {
-            assert_eq!(decode(encode(answer)), answer);
-        }
-        assert_eq!(decode(200), None);
     }
 }
